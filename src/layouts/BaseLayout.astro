@@ -1,0 +1,91 @@
+---
+import '../styles/global.css';
+
+interface Props {
+  title: string;
+  description: string;
+  pubDate?: Date;
+  updatedDate?: Date;
+  ogType?: 'website' | 'article';
+}
+
+const {
+  title,
+  description,
+  pubDate,
+  updatedDate,
+  ogType = 'website',
+} = Astro.props;
+
+const siteName = 'Gaston Guitart';
+const pageTitle = title === siteName ? title : `${title} · ${siteName}`;
+const canonicalURL = new URL(Astro.url.pathname, Astro.site);
+
+// Sign up at https://www.goatcounter.com, create a site, and replace this
+// with the code it gives you (the part before ".goatcounter.com"). Only
+// loads on the production build, never in `astro dev`.
+const GOATCOUNTER_CODE = 'ggasgg';
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{pageTitle}</title>
+    <meta name="description" content={description} />
+    <link rel="canonical" href={canonicalURL} />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link
+      rel="alternate"
+      type="application/rss+xml"
+      title={siteName}
+      href={new URL('rss.xml', Astro.site)}
+    />
+
+    <meta property="og:type" content={ogType} />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    <meta property="og:url" content={canonicalURL} />
+    <meta property="og:site_name" content={siteName} />
+    {pubDate && <meta property="article:published_time" content={pubDate.toISOString()} />}
+    {updatedDate && <meta property="article:modified_time" content={updatedDate.toISOString()} />}
+
+    <meta name="twitter:card" content="summary" />
+    <meta name="twitter:title" content={title} />
+    <meta name="twitter:description" content={description} />
+
+    <meta name="generator" content={Astro.generator} />
+
+    {import.meta.env.PROD && GOATCOUNTER_CODE !== 'YOUR-CODE' && (
+      <script
+        is:inline
+        data-goatcounter={`https://${GOATCOUNTER_CODE}.goatcounter.com/count`}
+        async
+        src="//gc.zgo.at/count.js"
+      ></script>
+    )}
+  </head>
+  <body>
+    <header class="site-header">
+      <nav>
+        <a class="brand" href="/">Gaston GG</a>
+        <a href="/blog">Writing</a>
+        <a href="/about">About</a>
+        <a href="/rss.xml">RSS</a>
+      </nav>
+    </header>
+
+    <main>
+      <slot />
+    </main>
+
+    <footer class="site-footer">
+      <nav>
+        <a href="https://github.com/ggasg" rel="me">GitHub</a>
+        <a href="https://dev.to/ggasg" rel="me">dev.to</a>
+        <span>&copy; {new Date().getFullYear()} Gaston Guitart</span>
+      </nav>
+    </footer>
+  </body>
+</html>

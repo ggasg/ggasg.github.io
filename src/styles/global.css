@@ -1,0 +1,247 @@
+:root {
+  --color-bg: #0b0d10;
+  --color-bg-elevated: #12151a;
+  --color-text: #e6e8eb;
+  --color-text-muted: #97a0ab;
+  --color-accent: #5fb3ff;
+  --color-border: #23272e;
+
+  /* One accent, used sparingly: Fender's Burgundy Mist Metallic,
+     deployed the way Braun used a single red-orange switch on an
+     otherwise neutral chassis. Not for body text, just the odd precise
+     accent (rule, glow, selection, hover). */
+  --color-spice: #9c2d54;
+  --color-spice-rgb: 156, 45, 84;
+  --color-selection-text: #fdf0f5;
+
+  --font-sans: "Helvetica Neue", Helvetica, Arial, "Segoe UI", system-ui, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+  --content-width: 42rem;
+}
+
+/* Follow the system theme instead of forcing black. The dark palette
+   above stays the default (and is what renders for anyone without a
+   stated preference); this overrides it for light-mode systems with a
+   cool, neutral off-white (Braun's "papier-weiss" plastics) rather
+   than a warm parchment tone. */
+@media (prefers-color-scheme: light) {
+  :root {
+    --color-bg: #eef0f2;
+    --color-bg-elevated: #e2e5e9;
+    --color-text: #14161a;
+    --color-text-muted: #565d68;
+    --color-accent: #0b62c4;
+    --color-border: #d3d7dc;
+    --color-spice: #7a2144;
+    --color-spice-rgb: 122, 33, 68;
+    --color-selection-text: #fdf0f5;
+  }
+}
+
+body::before {
+  content: "";
+  display: block;
+  height: 3px;
+  background: var(--color-spice);
+}
+
+::selection {
+  background: var(--color-spice);
+  color: var(--color-selection-text);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  color-scheme: light dark;
+}
+
+body {
+  margin: 0;
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-sans);
+  line-height: 1.6;
+  font-size: 1.0625rem;
+}
+
+main {
+  max-width: var(--content-width);
+  margin: 0 auto;
+  padding: 2.5rem 1.25rem 4rem;
+}
+
+a {
+  color: var(--color-accent);
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+  text-decoration-color: var(--color-spice);
+  text-decoration-thickness: 2px;
+  text-underline-offset: 2px;
+}
+
+a:focus-visible,
+button:focus-visible {
+  outline: 2px solid var(--color-spice);
+  outline-offset: 2px;
+}
+
+h1, h2, h3, h4 {
+  line-height: 1.25;
+  font-weight: 650;
+}
+
+code {
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+  background: var(--color-bg-elevated);
+  padding: 0.15em 0.4em;
+  border-radius: 4px;
+}
+
+pre {
+  padding: 1rem;
+  border-radius: 8px;
+  overflow-x: auto;
+  border: 1px solid var(--color-border);
+}
+
+pre code {
+  background: none;
+  padding: 0;
+}
+
+/* Shiki emits both themes' colors as CSS variables on each token but
+   only applies the light one by default; this switches to the dark
+   set to match the system preference. */
+@media (prefers-color-scheme: dark) {
+  .astro-code,
+  .astro-code span {
+    color: var(--shiki-dark) !important;
+    background-color: var(--shiki-dark-bg) !important;
+    font-style: var(--shiki-dark-font-style) !important;
+    font-weight: var(--shiki-dark-font-weight) !important;
+    text-decoration: var(--shiki-dark-text-decoration) !important;
+  }
+}
+
+blockquote {
+  margin: 1.5rem 0;
+  padding-left: 1rem;
+  border-left: 3px solid var(--color-spice);
+  color: var(--color-text-muted);
+}
+
+hr {
+  border: none;
+  border-top: 1px solid var(--color-border);
+  margin: 2.5rem 0;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+th, td {
+  border: 1px solid var(--color-border);
+  padding: 0.5rem 0.75rem;
+  text-align: left;
+}
+
+.site-header {
+  border-bottom: 1px solid var(--color-border);
+}
+
+.site-header nav {
+  max-width: var(--content-width);
+  margin: 0 auto;
+  padding: 1.25rem;
+  display: flex;
+  gap: 1.5rem;
+  align-items: center;
+}
+
+.site-header .brand {
+  font-weight: 700;
+  color: var(--color-text);
+  margin-right: auto;
+  text-shadow: 0 0 22px rgba(var(--color-spice-rgb), 0.55);
+}
+
+.site-footer {
+  border-top: 1px solid var(--color-border);
+  color: var(--color-text-muted);
+  font-size: 0.9rem;
+}
+
+.site-footer nav {
+  max-width: var(--content-width);
+  margin: 0 auto;
+  padding: 1.5rem 1.25rem;
+  display: flex;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.post-list {
+  list-style: none;
+  padding: 0;
+  margin: 2rem 0 0;
+}
+
+.post-list li {
+  margin-bottom: 1.5rem;
+}
+
+.post-list time {
+  display: block;
+  color: var(--color-text-muted);
+  font-size: 0.875rem;
+  font-family: var(--font-mono);
+  margin-bottom: 0.15rem;
+}
+
+.post-list a {
+  color: var(--color-text);
+  font-weight: 600;
+  font-size: 1.1rem;
+}
+
+.post-meta {
+  color: var(--color-text-muted);
+  font-size: 0.9rem;
+  font-family: var(--font-mono);
+  margin-bottom: 2rem;
+}
+
+.tag {
+  display: inline-block;
+  font-size: 0.75rem;
+  font-family: var(--font-mono);
+  color: var(--color-text-muted);
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  padding: 0.1rem 0.6rem;
+  margin-right: 0.4rem;
+  transition: border-color 0.15s ease, color 0.15s ease;
+}
+
+.tag:hover {
+  border-color: var(--color-spice);
+  color: var(--color-spice);
+}
+
+.repo-callout {
+  margin: 2rem 0;
+  padding: 1rem 1.25rem;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-bg-elevated);
+  font-size: 0.95rem;
+}
