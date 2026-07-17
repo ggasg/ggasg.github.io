@@ -1,0 +1,45 @@
+---
+import BaseLayout from '../layouts/BaseLayout.astro';
+import { getCollection } from 'astro:content';
+
+const allPosts = await getCollection('blog', ({ data }) =>
+  import.meta.env.DEV || !data.draft
+);
+const recentPosts = allPosts
+  .sort((a, b) => b.data.pubDate.valueOf() - a.data.pubDate.valueOf())
+  .slice(0, 5);
+---
+
+<BaseLayout
+  title="Gaston Guitart"
+  description="Notes on processing large amounts of data in a distributed, modern way, with code, benchmarks, and evidence."
+>
+  <h1>Gaston Guitart</h1>
+  <p>
+    I write about building and operating distributed data systems: the
+    design decisions, the trade-offs, and the numbers behind them. Posts come
+    with runnable code and, where it matters, benchmarks.
+  </p>
+
+  <h2>Recent writing</h2>
+  {recentPosts.length === 0 ? (
+    <p><em>Nothing published yet, first post coming soon.</em></p>
+  ) : (
+    <ul class="post-list">
+      {recentPosts.map((post) => (
+        <li>
+          <time datetime={post.data.pubDate.toISOString()}>
+            {post.data.pubDate.toLocaleDateString('en-US', {
+              year: 'numeric',
+              month: 'long',
+              day: 'numeric',
+            })}
+          </time>
+          <a href={`/blog/${post.id}/`}>{post.data.title}</a>
+        </li>
+      ))}
+    </ul>
+  )}
+
+  {allPosts.length > 5 && <p><a href="/blog">All posts &rarr;</a></p>}
+</BaseLayout>
