@@ -1,0 +1,36 @@
+---
+// Comments via giscus (GitHub Discussions). To activate:
+// 1. Settings > General > Features > enable "Discussions" on this repo.
+// 2. Install the giscus app on this repo: https://github.com/apps/giscus
+// 3. Go to https://giscus.app, enter "ggasg/ggasg.github.io", pick a
+//    discussion category (a dedicated "Comments" category works well),
+//    and copy the data-repo-id / data-category-id values it generates.
+const REPO = 'ggasg/ggasg.github.io';
+const REPO_ID = 'R_kgDOTVuMNw';
+const CATEGORY = 'Comments';
+const CATEGORY_ID = 'DIC_kwDOTVuMN84DBaTx';
+
+const isConfigured = REPO_ID !== 'YOUR-REPO-ID' && CATEGORY_ID !== 'YOUR-CATEGORY-ID';
+---
+
+{isConfigured && (
+  <section class="comments">
+    <script
+      is:inline
+      src="https://giscus.app/client.js"
+      data-repo={REPO}
+      data-repo-id={REPO_ID}
+      data-category={CATEGORY}
+      data-category-id={CATEGORY_ID}
+      data-mapping="pathname"
+      data-strict="0"
+      data-reactions-enabled="1"
+      data-emit-metadata="0"
+      data-input-position="bottom"
+      data-theme="preferred_color_scheme"
+      data-lang="en"
+      crossorigin="anonymous"
+      async
+    ></script>
+  </section>
+)}
