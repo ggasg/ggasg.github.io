@@ -1,5 +1,6 @@
 ---
 import BaseLayout from '../../layouts/BaseLayout.astro';
+import Giscus from '../../components/Giscus.astro';
 import { getCollection, render } from 'astro:content';
 
 export async function getStaticPaths() {
@@ -63,4 +64,7 @@ const { Content } = await render(post);
 
     <Content />
   </article>
+
+  <hr />
+  <Giscus />
 </BaseLayout>
