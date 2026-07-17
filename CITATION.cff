@@ -1,0 +1,22 @@
+cff-version: 1.2.0
+message: >-
+  If you reference, quote, or adapt this site's writing, please cite it
+  as below. This citation format is the attribution requested under the
+  CC BY 4.0 license that covers the post content; see
+  LICENSE-CONTENT.md. Code samples and the site itself are licensed
+  separately under MIT; see LICENSE.
+title: >-
+  Gaston Guitart — Notes on Distributed, Data-Intensive Systems
+authors:
+  - family-names: Guitart
+    given-names: Gaston
+type: generic
+url: "https://ggasg.github.io"
+license:
+  - MIT
+  - CC-BY-4.0
+date-released: 2026-07-17
+abstract: >-
+  Personal writing on distributed and data-intensive systems: storage
+  engines, streaming and dataflow, and the trade-offs behind them,
+  backed by code and measurements rather than opinion.
