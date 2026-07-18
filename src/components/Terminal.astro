@@ -1,0 +1,81 @@
+---
+// Renders text as terminal/command output: dark chrome, no syntax
+// highlighting, so it reads as "this printed" rather than "this is
+// source code." Can take literal content, or fetch a file from a repo
+// at build time (same pinned-commit approach as GithubFile.astro) so
+// output like `explain()` dumps stays in sync with the actual repo.
+interface Props {
+  repo?: string;
+  commit?: string;
+  path?: string;
+  content?: string;
+}
+
+const { repo, commit, path, content } = Astro.props;
+
+let text = content;
+if (text == null) {
+  if (!repo || !commit || !path) {
+    throw new Error('Terminal: provide either `content` or `repo` + `commit` + `path`');
+  }
+  const rawUrl = `https://raw.githubusercontent.com/${repo}/${commit}/${path}`;
+  const res = await fetch(rawUrl);
+  if (!res.ok) {
+    throw new Error(`Terminal: failed to fetch ${rawUrl} (${res.status})`);
+  }
+  text = (await res.text()).replace(/\n$/, '');
+}
+---
+
+<div class="terminal">
+  <div class="terminal-header">
+    <span class="dot dot-red"></span>
+    <span class="dot dot-yellow"></span>
+    <span class="dot dot-green"></span>
+  </div>
+  <pre class="terminal-body">{text}</pre>
+</div>
+
+<style>
+  .terminal {
+    margin: 1.5rem 0;
+    border-radius: 8px;
+    overflow: hidden;
+    background: #1a1b1e;
+    border: 1px solid #2c2e33;
+  }
+  .terminal-header {
+    display: flex;
+    gap: 0.4rem;
+    padding: 0.6rem 0.8rem;
+    background: #26282c;
+  }
+  .dot {
+    width: 0.7rem;
+    height: 0.7rem;
+    border-radius: 50%;
+    display: inline-block;
+  }
+  .dot-red {
+    background: #ff5f56;
+  }
+  .dot-yellow {
+    background: #ffbd2e;
+  }
+  .dot-green {
+    background: #27c93f;
+  }
+  .terminal-body {
+    margin: 0;
+    padding: 1rem 1.1rem;
+    color: #e6e8eb;
+    font-family: var(--font-mono);
+    font-size: 0.9em;
+    line-height: 1.5;
+    overflow-x: auto;
+    white-space: pre;
+    border: none;
+    border-radius: 0;
+    background: transparent;
+  }
+</style>

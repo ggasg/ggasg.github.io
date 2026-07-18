@@ -1,0 +1,121 @@
+---
+// Renders a snippet of a real file from a GitHub repo, fetched at build
+// time and highlighted with the site's own Shiki theme. Nothing here is
+// hand-copied: change the file in the repo, the snippet updates on the
+// next build. Pin `commit` to a specific SHA (not a branch) so a line
+// range never silently drifts out from under the article.
+import { codeToHtml } from 'shiki';
+
+interface Props {
+  repo: string; // "owner/repo"
+  commit: string; // full commit SHA
+  path: string; // path within the repo
+  lang: string; // shiki language id
+  startLine?: number; // 1-indexed, inclusive
+  endLine?: number; // 1-indexed, inclusive
+}
+
+const { repo, commit, path, lang, startLine, endLine } = Astro.props;
+
+const rawUrl = `https://raw.githubusercontent.com/${repo}/${commit}/${path}`;
+const res = await fetch(rawUrl);
+if (!res.ok) {
+  throw new Error(`GithubFile: failed to fetch ${rawUrl} (${res.status})`);
+}
+const fullText = (await res.text()).replace(/\n$/, '');
+const allLines = fullText.split('\n');
+
+const from = startLine ?? 1;
+const to = endLine ?? allLines.length;
+const snippetLines = allLines.slice(from - 1, to);
+const snippet = snippetLines.join('\n');
+
+const html = await codeToHtml(snippet, {
+  lang,
+  themes: { light: 'github-light', dark: 'github-dark' },
+});
+
+const rangeSuffix =
+  startLine == null ? '' : endLine && endLine !== startLine ? `#L${startLine}-L${endLine}` : `#L${startLine}`;
+const blobUrl = `https://github.com/${repo}/blob/${commit}/${path}${rangeSuffix}`;
+const rangeLabel =
+  startLine == null ? null : endLine && endLine !== startLine ? `L${startLine}-L${endLine}` : `L${startLine}`;
+---
+
+<div class="gh-file">
+  <a class="gh-file-header" href={blobUrl} target="_blank" rel="noopener noreferrer">
+    <span class="gh-file-path">{path}</span>
+    {rangeLabel && <span class="gh-file-range">{rangeLabel}</span>}
+  </a>
+  <div class="gh-file-body">
+    <div class="gh-linenums" aria-hidden="true">
+      {snippetLines.map((_, i) => <span>{from + i}</span>)}
+    </div>
+    <div class="gh-code" set:html={html} />
+  </div>
+</div>
+
+<style>
+  .gh-file {
+    margin: 1.5rem 0;
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  .gh-file-header {
+    display: flex;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: 0.5rem 0.9rem;
+    background: var(--color-bg-elevated);
+    border-bottom: 1px solid var(--color-border);
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+    color: var(--color-text-muted);
+    text-decoration: none;
+  }
+  .gh-file-header:hover .gh-file-path {
+    color: var(--color-text);
+    text-decoration: underline;
+    text-decoration-color: var(--color-spice);
+  }
+  .gh-file-range {
+    flex-shrink: 0;
+  }
+  .gh-file-body {
+    display: flex;
+  }
+  .gh-linenums {
+    display: flex;
+    flex-direction: column;
+    padding: 1rem 0.75rem;
+    text-align: right;
+    color: #6e7781;
+    background: #f6f8fa;
+    font-family: var(--font-mono);
+    font-size: 0.9em;
+    line-height: 1.5;
+    user-select: none;
+    border-right: 1px solid var(--color-border);
+  }
+  @media (prefers-color-scheme: dark) {
+    .gh-linenums {
+      color: #8b949e;
+      background: #161b22;
+    }
+  }
+  .gh-code {
+    flex: 1;
+    min-width: 0;
+  }
+  .gh-code :global(pre) {
+    margin: 0;
+    padding: 1rem;
+    border: none;
+    border-radius: 0;
+    overflow-x: auto;
+    white-space: pre !important;
+    line-height: 1.5;
+    font-size: 0.9em;
+  }
+</style>

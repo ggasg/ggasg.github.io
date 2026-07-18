@@ -28,8 +28,8 @@
   :root {
     --color-bg: #eef0f2;
     --color-bg-elevated: #e2e5e9;
-    --color-text: #14161a;
-    --color-text-muted: #565d68;
+    --color-text: #2b2e33;
+    --color-text-muted: #656c77;
     --color-accent: #0b62c4;
     --color-border: #d3d7dc;
     --color-spice: #7a2144;
@@ -93,15 +93,19 @@ button:focus-visible {
 
 h1, h2, h3, h4 {
   line-height: 1.25;
-  font-weight: 650;
+  font-weight: 500;
+}
+
+strong, b {
+  font-weight: 600;
 }
 
 code {
   font-family: var(--font-mono);
-  font-size: 0.9em;
-  background: var(--color-bg-elevated);
-  padding: 0.15em 0.4em;
-  border-radius: 4px;
+  font-size: 0.88em;
+  background: color-mix(in srgb, var(--color-text) 8%, transparent);
+  padding: 0.1em 0.35em;
+  border-radius: 3px;
 }
 
 pre {
