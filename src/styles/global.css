@@ -413,6 +413,19 @@ figcaption {
   font-size: 0.95rem;
 }
 
+/* The summary under a post title: the body measure, a step larger and
+   quieter, so it reads as a summary rather than as the first paragraph. */
+.standfirst {
+  font-size: 1.15rem;
+  line-height: 1.55;
+  color: var(--color-text-muted);
+  margin: 0 0 2.25rem;
+}
+
+.standfirst p {
+  margin: 0;
+}
+
 .post-meta {
   color: var(--color-text-muted);
   font-size: 0.85rem;
@@ -441,13 +454,4 @@ figcaption {
 .tag:hover {
   border-color: var(--color-spice);
   color: var(--color-spice);
-}
-
-.repo-callout {
-  margin: 2rem 0;
-  padding: 0.9rem 1.1rem;
-  border: 1px solid var(--color-border);
-  border-radius: 6px;
-  background: var(--color-bg-elevated);
-  font-size: 0.95rem;
 }

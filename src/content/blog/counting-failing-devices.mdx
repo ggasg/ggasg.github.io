@@ -30,6 +30,18 @@ import Note from '../../components/Note.astro';
   @media (prefers-color-scheme: light) { .fig { --s2: #7a2144; } }
 `}</style>
 
+<div class="standfirst">
+
+Counting alerts and counting failing devices are different questions, and during
+an incident only the second one tells you how much of the fleet is affected. This
+article follows that second number through a streaming pipeline on Google Cloud,
+from the Beam window where repeated alerts collapse to the BigQuery view where the
+HLL++ sketch is built. The placement of that sketch is not a matter of preference:
+one line in the documentation for incremental materialized views decides it,
+several stages upstream of the query that needs the answer.
+
+</div>
+
 ## A hundred thousand alerts, but how many failing devices?
 
 Imagine monitoring an IoT fleet emitting 100,000 failure alerts every minute. Your real-time monitoring dashboard spikes red. Before alerting on-call field technicians, you need to answer a fundamental question: **Are 100,000 distinct devices failing, or is a single broken device spamming the pipeline 100,000 times?**
@@ -37,8 +49,6 @@ Imagine monitoring an IoT fleet emitting 100,000 failure alerts every minute. Yo
 The former represents a fleet-wide outage; the latter is a routine hardware swap. Yet, if your dashboard queries are based on `COUNT(*)`, both scenarios will look identical.
 
 What we are dealing with here is **cardinality estimation** under high-throughput streaming constraints. Measuring page views vs. unique visitors, or API errors vs. impacted customers, shares this exact structure.
-
-In this article, I will analyze what it takes to compute unique active failures in real time across streaming pipelines on Google Cloud Platform (GCP). We will investigate why **HyperLogLog++ (HLL++) sketches** may be valuable not just for memory compression, but for their **mergeability property across temporal boundaries**, and how a single line in BigQuery's Materialized View documentation dictates your upstream pipeline design in Apache Beam.
 
 > The pipeline code, the SQL, and the unit tests live in the [`eventually-consistent/counting-failing-devices`](https://github.com/ggasg/eventually-consistent/tree/main/counting-failing-devices) repository.
 
@@ -389,6 +399,26 @@ def test_merge_matches_counting_the_union_directly():
     direct = sketch_of(ids(0, 23 * 900 + 1_500))
     assert merged.estimate() == direct.estimate()
 ```
+
+---
+
+## Key takeaways
+
+**Recognise a cardinality problem.** If one participant gets ten times noisier and
+your number moves, you are counting events rather than things. That is the signal,
+and it arrives long before anyone says the word cardinality.
+
+**Decide what the stored column has to answer.** An integer answers the question it
+was aggregated for and nothing wider, because it records how many there were and
+not which ones. A sketch costs 32 KB per group and keeps enough to be combined with
+another, which is what a question spanning buckets requires. Pick before the column
+type is set, not after the first twenty-four-hour query comes back wrong.
+
+**Let the refresh mechanism place the aggregation.** An incremental materialized
+view can initialise a sketch but cannot merge one. That single restriction is what
+pushes sketch construction into BigQuery and keeps the Beam pipeline emitting arrays
+of device IDs, and it is worth checking the equivalent restriction in whatever
+maintains your own state before designing the stage that feeds it.
 
 ---
 

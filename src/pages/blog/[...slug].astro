@@ -87,12 +87,6 @@ const minutes = Math.max(1, Math.round(prose.split(/\s+/).filter(Boolean).length
       </p>
     )}
 
-    {post.data.repo && (
-      <p class="repo-callout">
-        Code and tests for this post: <a href={post.data.repo}>{post.data.repo}</a>
-      </p>
-    )}
-
     <Content />
   </article>
 
