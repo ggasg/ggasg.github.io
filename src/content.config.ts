@@ -14,6 +14,10 @@ const blog = defineCollection({
       tags: z.array(z.string()).default([]),
       // Optional companion repo for the article's code + tests.
       repo: z.string().url().optional(),
+      // Path under public/ to the card social networks show when the post
+      // is shared, 1200x627. Without one the post shares as a bare text
+      // card, so it is worth setting on anything meant to circulate.
+      ogImage: z.string().startsWith('/').optional(),
       heroImage: image().optional(),
     }),
 });

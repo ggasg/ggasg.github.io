@@ -33,6 +33,7 @@ const minutes = Math.max(1, Math.round(prose.split(/\s+/).filter(Boolean).length
   pubDate={post.data.pubDate}
   updatedDate={post.data.updatedDate}
   ogType="article"
+  ogImage={post.data.ogImage}
 >
   <div class="post-shell">
     {toc.length > 2 && (
