@@ -32,13 +32,10 @@ import Note from '../../components/Note.astro';
 
 <div class="standfirst">
 
-Counting alerts and counting failing devices are different questions, and during
-an incident only the second one tells you how much of the fleet is affected. This
-article follows that second number through a streaming pipeline on Google Cloud,
-from the Beam window where repeated alerts collapse to the BigQuery view where the
-HLL++ sketch is built. The placement of that sketch is not a matter of preference:
-one line in the documentation for incremental materialized views decides it,
-several stages upstream of the query that needs the answer.
+In a world in which the sheer scale of devices out in the field demands resource-efficient maintenance, 
+counting alerts and counting failing devices are different questions. And during
+an incident only the second one can begin telling a story of how much of the fleet is affected. This
+article looks into a way of implementing that second number through a streaming pipeline on Google Cloud.
 
 </div>
 
@@ -56,7 +53,7 @@ What we are dealing with here is **cardinality estimation** under high-throughpu
 
 ## Stream processing vs. Batch queries
 
-In a standard batch processing world, answering unique device counts is simple:
+When the entire block of data we're interested in is readily available (batch mode), answering unique device counts is as simple as a `COUNT(DISTINCT<column>)`:
 ```sql
 SELECT COUNT(DISTINCT device_id) 
 FROM telemetry.alerts 
@@ -110,7 +107,7 @@ emit. The reading at 20s turns up after that and has missed its window.
 </figcaption>
 </figure>
 
-These core concepts stem from [The Dataflow Model](https://www.vldb.org/pvldb/vol8/p1792-Akidau.pdf) (Akidau et al., VLDB 2015). [*Streaming Systems*](https://www.oreilly.com/library/view/streaming-systems/9781491983867/) by Tyler Akidau, Slava Chernyak, and Reuven Lax covers this material at book length and is essential reading for streaming practitioners.
+These core concepts stem from [The Dataflow Model](https://www.vldb.org/pvldb/vol8/p1792-Akidau.pdf) (Akidau et al., VLDB 2015). There are also two posts by Tyler Akidau [*Streaming 101*](https://www.oreilly.com/radar/the-world-beyond-batch-streaming-101/) and [*Streaming 102*](https://www.oreilly.com/radar/the-world-beyond-batch-streaming-102/) which are essential reading for streaming practitioners.
 
 ### Memory vs. Precision: The HyperLogLog++ Sketch
 
@@ -129,6 +126,7 @@ For distinct counts, the trade is exactness for a bounded memory footprint:
 ---
 
 ## End-to-End Pipeline Architecture
+The design proposed here is built from a custom Python-based synthetic data generator and three GCP services. The generator can be run locally.
 
 <figure class="fig">
 <svg viewBox="0 0 640 250" role="img" aria-labelledby="archt">
@@ -180,6 +178,7 @@ Pipeline architecture: Pub/Sub ingests events, Dataflow deduplicates distinct ID
 </figcaption>
 </figure>
 
+And below we see the business logic implemented by the Beam piece.
 <figure class="fig">
 <svg viewBox="-6 0 646 260" role="img" aria-labelledby="logict">
   <title id="logict">What each pipeline stage discards, across two one-minute windows</title>
@@ -402,23 +401,23 @@ def test_merge_matches_counting_the_union_directly():
 
 ---
 
-## Key takeaways
+## Closing remarks
+
+So putting together everything I've learned from this into a repeatable pattern:
 
 **Recognise a cardinality problem.** If one participant gets ten times noisier and
-your number moves, you are counting events rather than things. That is the signal,
-and it arrives long before anyone says the word cardinality.
+the metric you are concerned with is affected, you may be counting events rather than the characteristic that impacts your business process.
 
 **Decide what the stored column has to answer.** An integer answers the question it
-was aggregated for and nothing wider, because it records how many there were and
+was aggregated for and nothing wider, because it records how many there were but
 not which ones. A sketch costs 32 KB per group and keeps enough to be combined with
-another, which is what a question spanning buckets requires. Pick before the column
-type is set, not after the first twenty-four-hour query comes back wrong.
+another, which is what a question involving different time grains (for example) may involve.
 
 **Let the refresh mechanism place the aggregation.** An incremental materialized
 view can initialise a sketch but cannot merge one. That single restriction is what
 pushes sketch construction into BigQuery and keeps the Beam pipeline emitting arrays
 of device IDs, and it is worth checking the equivalent restriction in whatever
-maintains your own state before designing the stage that feeds it.
+maintains your own state.
 
 ---
 
