@@ -1,0 +1,17 @@
+---
+// A note or a caution box, the kind the Azure and Google Cloud docs use to
+// lift a constraint out of the prose. Two variants, no icons: `note` for
+// something worth pausing on, `caution` for something that will bite.
+interface Props {
+  type?: 'note' | 'caution';
+  title?: string;
+}
+
+const { type = 'note', title } = Astro.props;
+const label = title ?? (type === 'caution' ? 'Caution' : 'Note');
+---
+
+<aside class={`callout ${type === 'caution' ? 'is-caution' : ''}`}>
+  <span class="callout-label">{label}</span>
+  <slot />
+</aside>

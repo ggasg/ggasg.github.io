@@ -87,5 +87,39 @@ const GOATCOUNTER_CODE = 'ggasgg';
         <span>&copy; {new Date().getFullYear()} Gaston Guitart</span>
       </nav>
     </footer>
+
+    <script>
+      // Give every fenced code block the header bar and copy button that
+      // the GitHub snippet component already has. Built by script rather
+      // than by a markdown plugin so a block that predates this, or a
+      // reader with scripting off, still gets a readable <pre>.
+      for (const pre of document.querySelectorAll('pre[data-language]')) {
+        const wrapper = document.createElement('div');
+        wrapper.className = 'code-block';
+        const header = document.createElement('div');
+        header.className = 'code-block-header';
+
+        const lang = document.createElement('span');
+        lang.textContent = pre.dataset.language ?? '';
+
+        const button = document.createElement('button');
+        button.className = 'copy-button';
+        button.type = 'button';
+        button.textContent = 'Copy';
+        button.addEventListener('click', async () => {
+          try {
+            await navigator.clipboard.writeText(pre.innerText);
+            button.textContent = 'Copied';
+          } catch {
+            button.textContent = 'Press Ctrl+C';
+          }
+          setTimeout(() => (button.textContent = 'Copy'), 1600);
+        });
+
+        header.append(lang, button);
+        pre.replaceWith(wrapper);
+        wrapper.append(header, pre);
+      }
+    </script>
   </body>
 </html>

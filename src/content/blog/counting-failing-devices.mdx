@@ -1,0 +1,404 @@
+---
+title: "Counting failing devices without keeping their names"
+description: "A sensor fleet produces 100,000 alerts a minute. Answering how many unique devices are actually broken, while readings are still arriving, comes down to a single constraint in the BigQuery documentation."
+pubDate: 2026-09-20
+draft: false
+tags: ["bigquery", "apache-beam", "streaming", "IoT", "cardinality"]
+repo: "https://github.com/ggasg/eventually-consistent/tree/main/counting-failing-devices"
+---
+
+import Note from '../../components/Note.astro';
+
+<style>{`
+  .fig { --s1: var(--color-accent); --s2: #c9527a; margin: 2rem 0; }
+  .fig svg { width: 100%; height: auto; display: block; }
+  .fig figcaption {
+    font-size: 0.85rem; color: var(--color-text-muted);
+    margin-top: 0.6rem; line-height: 1.5;
+  }
+  .fig .axis { stroke: var(--color-border); stroke-width: 1; }
+  .fig .grid { stroke: var(--color-border); stroke-width: 1; stroke-dasharray: 2 4; }
+  .fig .tick { fill: var(--color-text-muted); font-size: 11px; font-family: var(--font-mono); }
+  .fig .lbl  { fill: var(--color-text); font-size: 12px; font-family: var(--font-sans); }
+  .fig .box  { fill: var(--color-bg-elevated); stroke: var(--color-border); }
+  .fig .note { fill: var(--color-text-muted); font-size: 11px; font-family: var(--font-sans); }
+  .fig .sub  { fill: var(--color-text-muted); font-size: 9.5px; font-family: var(--font-sans); }
+  .fig .chip-on  { fill: var(--color-bg); font-size: 11px; font-family: var(--font-mono); font-weight: 600; }
+  .fig .chip-off { fill: var(--color-text-muted); font-size: 11px; font-family: var(--font-mono); }
+  .fig .wm       { fill: var(--s1); font-size: 11px; font-family: var(--font-mono); font-weight: 600; }
+  @media (prefers-color-scheme: light) { .fig { --s2: #7a2144; } }
+`}</style>
+
+## A hundred thousand alerts, but how many failing devices?
+
+Imagine monitoring an IoT fleet emitting 100,000 failure alerts every minute. Your real-time monitoring dashboard spikes red. Before alerting on-call field technicians, you need to answer a fundamental question: **Are 100,000 distinct devices failing, or is a single broken device spamming the pipeline 100,000 times?**
+
+The former represents a fleet-wide outage; the latter is a routine hardware swap. Yet, if your dashboard queries are based on `COUNT(*)`, both scenarios will look identical.
+
+What we are dealing with here is **cardinality estimation** under high-throughput streaming constraints. Measuring page views vs. unique visitors, or API errors vs. impacted customers, shares this exact structure.
+
+In this article, I will analyze what it takes to compute unique active failures in real time across streaming pipelines on Google Cloud Platform (GCP). We will investigate why **HyperLogLog++ (HLL++) sketches** may be valuable not just for memory compression, but for their **mergeability property across temporal boundaries**, and how a single line in BigQuery's Materialized View documentation dictates your upstream pipeline design in Apache Beam.
+
+> The pipeline code, the SQL, and the unit tests live in the [`eventually-consistent/counting-failing-devices`](https://github.com/ggasg/eventually-consistent/tree/main/counting-failing-devices) repository.
+
+---
+
+## Stream processing vs. Batch queries
+
+In a standard batch processing world, answering unique device counts is simple:
+```sql
+SELECT COUNT(DISTINCT device_id) 
+FROM telemetry.alerts 
+WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR);
+```
+
+In a real-time streaming architecture, however, data never stops arriving. Streams are unbounded, and records can (and will) arrive out of order due to a wide variety of reasons like network latency, retries, flaky connections, or lower level middleware GC pauses.
+
+To handle streaming inputs, Data Engineers may choose to partition data into **fixed-time windows** (e.g., 1-minute tumbling windows). Streaming Frameworks like Flink or Spark Structured Streaming (to an extent) manage late-arriving events via **watermarks**, the streaming engine’s dynamic progress estimator. When a watermark passes the boundary of a window, the pipeline materializes the aggregated result.
+
+<figure class="fig">
+<svg viewBox="-20 0 560 175" role="img" aria-labelledby="wmt">
+  <title id="wmt">Readings and watermarks travelling in one stream, and the point at which a window emits</title>
+
+  <text class="lbl" x="92" y="84" text-anchor="end">Arrival order</text>
+  <text class="sub" x="92" y="98" text-anchor="end">labels are event times</text>
+
+  <text class="tick" x="104" y="86" text-anchor="middle">&#183;&#183;&#183;</text>
+
+  <rect x="118" y="64" width="34" height="34" rx="5" fill="var(--s1)"/>
+  <text class="chip-on" x="135" y="86" text-anchor="middle">12</text>
+  <rect x="162" y="64" width="34" height="34" rx="5" fill="var(--s1)"/>
+  <text class="chip-on" x="179" y="86" text-anchor="middle">47</text>
+
+  <rect x="206" y="64" width="58" height="34" rx="5" fill="none" stroke="var(--s1)" stroke-width="1.5"/>
+  <text class="wm" x="235" y="86" text-anchor="middle">W(30)</text>
+
+  <rect x="274" y="64" width="34" height="34" rx="5" fill="var(--s1)"/>
+  <text class="chip-on" x="291" y="86" text-anchor="middle">29</text>
+  <rect x="318" y="64" width="34" height="34" rx="5" fill="var(--s1)"/>
+  <text class="chip-on" x="335" y="86" text-anchor="middle">58</text>
+
+  <rect x="362" y="64" width="58" height="34" rx="5" fill="none" stroke="var(--s1)" stroke-width="1.5"/>
+  <text class="wm" x="391" y="86" text-anchor="middle">W(60)</text>
+
+  <line class="grid" x1="440" y1="38" x2="440" y2="124"/>
+  <text class="note" x="432" y="30" text-anchor="end">watermark passes 60s, the window emits</text>
+
+  <rect x="460" y="64" width="34" height="34" rx="5" fill="var(--color-border)"/>
+  <text class="chip-off" x="477" y="86" text-anchor="middle">20</text>
+  <text class="note" x="477" y="146" text-anchor="middle">late, dropped</text>
+
+  <text class="tick" x="510" y="86" text-anchor="middle">&#183;&#183;&#183;</text>
+</svg>
+<figcaption>
+One stream carrying both readings and watermarks. Each box is a reading
+labelled with its event time in seconds, and the labels do not climb steadily,
+which is what out-of-order arrival looks like. <code>W(60)</code> asserts that
+nothing earlier than 60s is still to come, so the window covering 0s to 60s can
+emit. The reading at 20s turns up after that and has missed its window.
+</figcaption>
+</figure>
+
+These core concepts stem from [The Dataflow Model](https://www.vldb.org/pvldb/vol8/p1792-Akidau.pdf) (Akidau et al., VLDB 2015). [*Streaming Systems*](https://www.oreilly.com/library/view/streaming-systems/9781491983867/) by Tyler Akidau, Slava Chernyak, and Reuven Lax covers this material at book length and is essential reading for streaming practitioners.
+
+### Memory vs. Precision: The HyperLogLog++ Sketch
+
+Tracking exact unique device IDs requires maintaining a set in memory. For a few thousand devices, this is trivial. For hundreds of millions of unique entities, maintaining set state inside streaming worker memory leads to memory pressure and high processing latency.
+
+A sketch is a compact summary of an aggregation that keeps enough information to extract a result, to carry on aggregating, or to be merged with another sketch of the same kind. BigQuery ships two families, HLL++ for distinct counts and KLL for quantiles, and documents both on its [sketches page](https://cloud.google.com/bigquery/docs/sketches).
+
+For distinct counts, the trade is exactness for a bounded memory footprint:
+
+* **HyperLogLog++** maps inputs into an array of small integer registers (32,768 registers at BigQuery's default settings, consuming roughly 32 KB).
+* **Deterministic Bounds:** at its default precision, BigQuery [documents](https://cloud.google.com/bigquery/docs/sketches) an error margin of **±1.15% at 95% confidence** and **±1.72% at 99% confidence**. The algorithm itself is [HyperLogLog in Practice](https://static.googleusercontent.com/media/research.google.com/en//pubs/archive/40671.pdf), by Heule, Nunkesser and Hall, 2013.
+* **Key Properties:**
+  1. **Constant Size:** Memory footprint remains 32 KB whether tracking 10 or 10,000,000 distinct IDs.
+  2. **Mergeability:** Two independent sketches built over disjoint time intervals can be combined (via bitwise maximum per register) to yield the exact sketch that would have been produced by evaluating all inputs at once.
+
+---
+
+## End-to-End Pipeline Architecture
+
+<figure class="fig">
+<svg viewBox="0 0 640 250" role="img" aria-labelledby="archt">
+  <title id="archt">Pipeline architecture: generator, Pub/Sub, Dataflow, BigQuery, rollup query</title>
+
+  <rect class="box" x="13"  y="60" width="98"  height="76" rx="8"/>
+  <text class="lbl" x="62"  y="104" text-anchor="middle">Generator</text>
+  <rect class="box" x="137" y="60" width="98"  height="76" rx="8"/>
+  <text class="lbl" x="186" y="104" text-anchor="middle">Pub/Sub</text>
+  <rect class="box" x="261" y="60" width="98"  height="76" rx="8"/>
+  <text class="lbl" x="310" y="104" text-anchor="middle">Dataflow</text>
+
+  <rect class="box" x="385" y="40" width="118" height="116" rx="8"/>
+  <text class="lbl" x="444" y="62" text-anchor="middle">BigQuery</text>
+  <rect x="393" y="74" width="102" height="28" rx="4" fill="none" stroke="var(--color-border)"/>
+  <text class="sub" x="444" y="92" text-anchor="middle">raw table</text>
+  <rect x="393" y="110" width="102" height="28" rx="4" fill="var(--s1)" opacity="0.16"/>
+  <rect x="393" y="110" width="102" height="28" rx="4" fill="none" stroke="var(--s1)" stroke-width="1.5"/>
+  <text class="sub" x="444" y="128" text-anchor="middle" fill="var(--s1)">materialized view</text>
+
+  <rect class="box" x="529" y="60" width="98"  height="76" rx="8"/>
+  <text class="lbl" x="578" y="104" text-anchor="middle">Rollup query</text>
+
+  <path d="M115 98 L133 98" stroke="var(--color-text-muted)" stroke-width="1.5" marker-end="url(#ah)"/>
+  <path d="M239 98 L257 98" stroke="var(--color-text-muted)" stroke-width="1.5" marker-end="url(#ah)"/>
+  <path d="M363 98 L381 98" stroke="var(--color-text-muted)" stroke-width="1.5" marker-end="url(#ah)"/>
+  <path d="M507 98 L525 98" stroke="var(--color-text-muted)" stroke-width="1.5" marker-end="url(#ah)"/>
+
+  <text class="sub" x="62"  y="174" text-anchor="middle">synthetic JSON</text>
+  <text class="sub" x="62"  y="188" text-anchor="middle">about 200 events/sec</text>
+  <text class="sub" x="186" y="174" text-anchor="middle">at-least-once</text>
+  <text class="sub" x="186" y="188" text-anchor="middle">topic and subscription</text>
+  <text class="sub" x="310" y="174" text-anchor="middle">filter, window, dedupe</text>
+  <text class="tick" x="444" y="175" text-anchor="middle" fill="var(--s1)">HLL_COUNT.INIT</text>
+  <text class="sub" x="444" y="190" text-anchor="middle">sketch created here</text>
+  <text class="tick" x="578" y="175" text-anchor="middle" fill="var(--s1)">HLL_COUNT.MERGE</text>
+  <text class="sub" x="578" y="190" text-anchor="middle">any time grain</text>
+
+  <text class="note" x="320" y="228" text-anchor="middle" fill="var(--color-text)">arrays of device IDs in, one sketch per hour out</text>
+
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0 L10 5 L0 10 z" fill="var(--color-text-muted)"/>
+    </marker>
+  </defs>
+</svg>
+<figcaption>
+Pipeline architecture: Pub/Sub ingests events, Dataflow deduplicates distinct IDs per window, BigQuery materializes hourly HLL++ sketches, and analytical rollups execute HLL_COUNT.MERGE at query time.
+</figcaption>
+</figure>
+
+<figure class="fig">
+<svg viewBox="-6 0 646 260" role="img" aria-labelledby="logict">
+  <title id="logict">What each pipeline stage discards, across two one-minute windows</title>
+
+  <text class="note" x="230" y="22" text-anchor="middle">1-minute window</text>
+  <text class="note" x="504" y="22" text-anchor="middle">1-minute window</text>
+  <line x1="367" y1="14" x2="367" y2="190" stroke="var(--color-border)" stroke-dasharray="3 4"/>
+
+  <text class="lbl" x="92" y="46"  text-anchor="end">Events</text>
+  <text class="sub" x="92" y="60"  text-anchor="end">event time</text>
+  <text class="lbl" x="92" y="106" text-anchor="end">After filter</text>
+  <text class="sub" x="92" y="120" text-anchor="end">normal readings gone</text>
+  <text class="lbl" x="92" y="168" text-anchor="end">Per window</text>
+  <text class="sub" x="92" y="182" text-anchor="end">distinct device IDs</text>
+  <text class="lbl" x="92" y="212" text-anchor="end">In BigQuery</text>
+  <text class="sub" x="92" y="226" text-anchor="end">across windows</text>
+
+  <g class="chips">
+    <rect x="110" y="34" width="30" height="28" rx="5" fill="var(--s1)"/>
+    <rect x="150" y="34" width="30" height="28" rx="5" fill="var(--s1)"/>
+    <rect x="190" y="34" width="30" height="28" rx="5" fill="var(--s1)"/>
+    <rect x="230" y="34" width="30" height="28" rx="5" fill="var(--color-border)"/>
+    <rect x="270" y="34" width="30" height="28" rx="5" fill="var(--s1)"/>
+    <rect x="310" y="34" width="30" height="28" rx="5" fill="var(--s1)"/>
+    <rect x="384" y="34" width="30" height="28" rx="5" fill="var(--s1)"/>
+    <rect x="424" y="34" width="30" height="28" rx="5" fill="var(--color-border)"/>
+    <rect x="464" y="34" width="30" height="28" rx="5" fill="var(--s1)"/>
+    <rect x="504" y="34" width="30" height="28" rx="5" fill="var(--s1)"/>
+    <rect x="544" y="34" width="30" height="28" rx="5" fill="var(--s1)"/>
+    <rect x="584" y="34" width="30" height="28" rx="5" fill="var(--color-border)"/>
+  </g>
+  <g class="chip-on" text-anchor="middle">
+    <text x="125" y="53">D1</text><text x="165" y="53">D2</text><text x="205" y="53">D1</text>
+    <text x="285" y="53">D1</text><text x="325" y="53">D2</text>
+    <text x="399" y="53">D2</text><text x="479" y="53">D5</text>
+    <text x="519" y="53">D2</text><text x="559" y="53">D5</text>
+  </g>
+  <g class="chip-off" text-anchor="middle">
+    <text x="245" y="53">D3</text><text x="439" y="53">D4</text><text x="599" y="53">D1</text>
+  </g>
+
+  <g>
+    <rect x="110" y="94" width="30" height="28" rx="5" fill="var(--s1)"/>
+    <rect x="150" y="94" width="30" height="28" rx="5" fill="var(--s1)"/>
+    <rect x="190" y="94" width="30" height="28" rx="5" fill="var(--s1)"/>
+    <rect x="270" y="94" width="30" height="28" rx="5" fill="var(--s1)"/>
+    <rect x="310" y="94" width="30" height="28" rx="5" fill="var(--s1)"/>
+    <rect x="384" y="94" width="30" height="28" rx="5" fill="var(--s1)"/>
+    <rect x="464" y="94" width="30" height="28" rx="5" fill="var(--s1)"/>
+    <rect x="504" y="94" width="30" height="28" rx="5" fill="var(--s1)"/>
+    <rect x="544" y="94" width="30" height="28" rx="5" fill="var(--s1)"/>
+  </g>
+  <g class="chip-on" text-anchor="middle">
+    <text x="125" y="113">D1</text><text x="165" y="113">D2</text><text x="205" y="113">D1</text>
+    <text x="285" y="113">D1</text><text x="325" y="113">D2</text>
+    <text x="399" y="113">D2</text><text x="479" y="113">D5</text>
+    <text x="519" y="113">D2</text><text x="559" y="113">D5</text>
+  </g>
+
+  <rect x="110" y="152" width="230" height="34" rx="5" fill="none" stroke="var(--s1)" stroke-width="1.5"/>
+  <text class="tick" x="225" y="174" text-anchor="middle" fill="var(--s1)">&#123; D1, D2 &#125;</text>
+  <rect x="384" y="152" width="230" height="34" rx="5" fill="none" stroke="var(--s1)" stroke-width="1.5"/>
+  <text class="tick" x="499" y="174" text-anchor="middle" fill="var(--s1)">&#123; D2, D5 &#125;</text>
+
+  <rect x="110" y="200" width="504" height="34" rx="5" fill="var(--s1)" opacity="0.14"/>
+  <rect x="110" y="200" width="504" height="34" rx="5" fill="none" stroke="var(--s1)" stroke-width="1.5"/>
+  <text class="tick" x="362" y="222" text-anchor="middle" fill="var(--s1)">HLL_COUNT.INIT  &#8594;  one sketch per hour</text>
+</svg>
+<figcaption>
+Dataflow stage filtering and window deduplication: normal telemetry is filtered, multiple alarms from device D1 within a window collapse to a single entry, and BigQuery builds HLL++ sketches across hourly buckets.
+</figcaption>
+</figure>
+
+### In-Memory Deduplication with Apache Beam
+
+In our pipeline, Apache Beam performs localized deduplication within a tumbling window using a custom `CombineFn`. If a device breaches an alarm threshold 50 times in a single minute, Dataflow emits its ID exactly once per window:
+
+```python
+import apache_beam as beam
+
+class DistinctDeviceIdsCombineFn(beam.CombineFn):
+    def create_accumulator(self):
+        return set()
+
+    def add_input(self, accumulator, device_id):
+        if device_id:
+            accumulator.add(str(device_id))
+        return accumulator
+
+    def merge_accumulators(self, accumulators):
+        merged = set()
+        for acc in accumulators:
+            merged.update(acc)
+        return merged
+
+    def extract_output(self, accumulator):
+        return sorted(accumulator)
+```
+
+The accumulator is a `set`, so adding a device ID that is already present leaves it unchanged. The payload leaving each window therefore scales with the number of **unique failing devices per minute**, and the message rate never enters into it.
+
+---
+
+## Deciding Where to Initialize the Sketch
+
+An intuitive optimization would be generating the HLL++ sketch directly inside the Apache Beam pipeline, emitting binary sketch payloads to BigQuery. However, BigQuery Materialized View semantics force a different architectural decision.
+
+BigQuery Materialized Views maintain incremental state as new rows land in underlying tables. To support zero-cost incremental maintenance, [BigQuery restricts the supported aggregation functions](https://cloud.google.com/bigquery/docs/materialized-views-create):
+
+<Note title="Supported aggregations in materialized views">
+`ANY_VALUE`, `APPROX_COUNT_DISTINCT`, `ARRAY_AGG`, `AVG`, `BIT_AND`, `BIT_OR`, `BIT_XOR`, `COUNT`, `COUNTIF`, `HLL_COUNT.INIT`, `LOGICAL_AND`, `LOGICAL_OR`, `MAX`, `MIN`, `MAX_BY`, `MIN_BY`, `SUM`
+</Note>
+
+Crucially, **`HLL_COUNT.INIT`** is supported, but **`HLL_COUNT.MERGE`** is not. 
+
+If Apache Beam emits pre-aggregated sketch binaries, BigQuery cannot incrementally merge them in a Materialized View without doing a full table re-scan. Therefore, **the pipeline must emit raw arrays of distinct device IDs (`ARRAY<STRING>`), delegating sketch initialization to BigQuery's native materialized engine:**
+
+```sql
+CREATE MATERIALIZED VIEW iot_analytics.hourly_anomaly_rollup AS
+SELECT
+  TIMESTAMP_TRUNC(window_timestamp, HOUR) AS hourly_bucket,
+  sensor_type,
+  HLL_COUNT.INIT(device_id) AS intermediate_sketch
+FROM iot_analytics.raw_anomaly_device_ids, UNNEST(device_ids) AS device_id
+GROUP BY 1, 2;
+```
+
+---
+
+## Storing a Count Instead of a Sketch
+
+The obvious design does not involve sketches at all, and it is simpler in every visible way.
+
+`APPROX_COUNT_DISTINCT` appears on the supported list above, so a Materialized View can maintain one integer per hourly bucket. That column costs eight bytes per group rather than 32 KB, it holds a number an engineer can read straight off the console instead of opaque `BYTES`, and any BI tool can aggregate it without knowing what a sketch is. It also dissolves the upstream question from the previous section: a view that only needs a count can be fed a count, so nothing forces the Beam pipeline to ship arrays of device IDs at all.
+
+For the question it was built for, it is also correct. Asked how many distinct devices were in alarm during a given hour, the stored integer is the right answer, and it is cheaper to reach than the sketch.
+
+The limit appears as soon as a question crosses a bucket boundary. Adding twenty-four hourly counts together counts each device once for every hour in which it appeared, so a device that stays in alarm all day contributes twenty-four times rather than once. This is not approximation error, and a more accurate estimator would not help. An `INT64` records how many devices there were and nothing about which ones, so two of them cannot be combined without double-counting whatever they have in common.
+
+<figure class="fig">
+<svg viewBox="0 0 640 300" role="img" aria-labelledby="fig1t">
+  <title id="fig1t">Comparing Integer Summation vs HLL Register Merging</title>
+
+  <text class="note" x="70"  y="14" text-anchor="middle">Hour 1</text>
+  <text class="note" x="250" y="14" text-anchor="middle">Hour 2</text>
+  <text class="note" x="430" y="14" text-anchor="middle">both hours together</text>
+
+  <rect x="0"   y="24" width="140" height="34" rx="4" fill="none" stroke="var(--color-border)"/>
+  <rect x="180" y="24" width="140" height="34" rx="4" fill="none" stroke="var(--color-border)"/>
+  <rect x="360" y="24" width="140" height="34" rx="4" fill="none" stroke="var(--color-border)"/>
+  <text class="lbl" x="70"  y="46" text-anchor="middle">D1 D2 D3</text>
+  <text class="lbl" x="250" y="46" text-anchor="middle">D2 D3 D4</text>
+  <text class="lbl" x="430" y="46" text-anchor="middle">D1 D2 D3 D4</text>
+  <text class="note" x="512" y="46">truth: 4 devices</text>
+
+  <line class="grid" x1="0" y1="76" x2="640" y2="76"/>
+
+  <text class="note" x="0" y="100">APPROX_COUNT_DISTINCT, stored as an INT64</text>
+  <rect x="0"   y="110" width="140" height="44" rx="4" fill="var(--s2)" opacity="0.16" stroke="var(--s2)"/>
+  <rect x="180" y="110" width="140" height="44" rx="4" fill="var(--s2)" opacity="0.16" stroke="var(--s2)"/>
+  <rect x="360" y="110" width="140" height="44" rx="4" fill="var(--s2)" opacity="0.16" stroke="var(--s2)"/>
+  <text class="lbl" x="70"  y="138" text-anchor="middle">3</text>
+  <text class="lbl" x="250" y="138" text-anchor="middle">3</text>
+  <text class="lbl" x="430" y="138" text-anchor="middle">6</text>
+  <text class="lbl" x="160" y="138" text-anchor="middle" fill="var(--color-text-muted)">+</text>
+  <text class="lbl" x="340" y="138" text-anchor="middle" fill="var(--color-text-muted)">=</text>
+  <text class="note" x="512" y="134" fill="var(--s2)">D2 and D3</text>
+  <text class="note" x="512" y="148" fill="var(--s2)">counted twice</text>
+
+  <text class="note" x="0" y="188">HLL_COUNT.INIT, stored as a register array</text>
+  <rect x="0"   y="198" width="140" height="56" rx="4" fill="var(--s1)" opacity="0.16" stroke="var(--s1)"/>
+  <rect x="180" y="198" width="140" height="56" rx="4" fill="var(--s1)" opacity="0.16" stroke="var(--s1)"/>
+  <rect x="360" y="198" width="140" height="56" rx="4" fill="var(--s1)" opacity="0.16" stroke="var(--s1)"/>
+
+  <g fill="var(--s1)">
+    <rect x="28"  y="234" width="8" height="12"/><rect x="42"  y="242" width="8" height="4"/>
+    <rect x="56"  y="230" width="8" height="16"/><rect x="70"  y="242" width="8" height="4"/>
+    <rect x="84"  y="226" width="8" height="20"/><rect x="98"  y="238" width="8" height="8"/>
+    <rect x="208" y="242" width="8" height="4"/><rect x="222" y="230" width="8" height="16"/>
+    <rect x="236" y="238" width="8" height="8"/><rect x="250" y="242" width="8" height="4"/>
+    <rect x="264" y="234" width="8" height="12"/><rect x="278" y="226" width="8" height="20"/>
+    <rect x="388" y="234" width="8" height="12"/><rect x="402" y="230" width="8" height="16"/>
+    <rect x="416" y="230" width="8" height="16"/><rect x="430" y="242" width="8" height="4"/>
+    <rect x="444" y="226" width="8" height="20"/><rect x="458" y="226" width="8" height="20"/>
+  </g>
+  <text class="tick" x="70"  y="218" text-anchor="middle">registers</text>
+  <text class="tick" x="250" y="218" text-anchor="middle">registers</text>
+  <text class="tick" x="430" y="218" text-anchor="middle">register-wise max</text>
+  <text class="lbl" x="160" y="230" text-anchor="middle" fill="var(--color-text-muted)">&#8746;</text>
+  <text class="lbl" x="340" y="230" text-anchor="middle" fill="var(--color-text-muted)">=</text>
+  <text class="note" x="512" y="226" fill="var(--s1)">estimate: 4</text>
+  <text class="note" x="512" y="240" fill="var(--s1)">devices</text>
+</svg>
+<figcaption>
+Summing integer distinct counts double-counts persistent devices across hourly boundaries. Merging HLL++ sketches preserves set idempotency by taking the bitwise maximum across register arrays.
+</figcaption>
+</figure>
+
+Merging sketches at read time answers the spanning question without that defect, because the register array still carries enough to tell a repeat from a new device:
+
+```sql
+SELECT
+  sensor_type,
+  HLL_COUNT.MERGE(intermediate_sketch) AS distinct_failing_devices
+FROM iot_analytics.hourly_anomaly_rollup
+WHERE hourly_bucket >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)
+GROUP BY sensor_type;
+```
+
+Because merging HLL++ sketches is associative and commutative, unit tests confirm that merging hourly sketches produces the exact same estimate as sketching the entire range at once:
+
+```python
+def test_merge_matches_counting_the_union_directly():
+    """Merging per-hour sketches gives the same answer as sketching the whole range."""
+    hours = [sketch_of(ids(h * 900, h * 900 + 1_500)) for h in range(24)]
+    merged = merge_all(hours)
+    direct = sketch_of(ids(0, 23 * 900 + 1_500))
+    assert merged.estimate() == direct.estimate()
+```
+
+---
+
+## Code and tests
+
+```bash
+git clone https://github.com/ggasg/eventually-consistent
+cd eventually-consistent/counting-failing-devices
+python3 -m pytest tests -q
+```
+
+If you have built something similar, or if BigQuery's Materialized View
+restrictions have pushed your own pipeline into a different shape, I would be
+glad to hear about it. Pull requests and issues are welcome on the repository.

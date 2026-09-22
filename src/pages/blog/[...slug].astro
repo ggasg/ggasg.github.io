@@ -14,7 +14,17 @@ export async function getStaticPaths() {
 }
 
 const { post } = Astro.props;
-const { Content } = await render(post);
+const { Content, headings } = await render(post);
+// Astro slugs every heading for us, so the contents list is just the h2s.
+const toc = headings.filter((h) => h.depth === 2);
+
+// Strip the JSX and the inline style block before counting, so the figures
+// and the CSS do not inflate the estimate. 220 words a minute is the usual
+// figure for technical prose.
+const prose = post.body
+  .replace(/<style>[\s\S]*?<\/style>/g, '')
+  .replace(/<[^>]+>/g, ' ');
+const minutes = Math.max(1, Math.round(prose.split(/\s+/).filter(Boolean).length / 220));
 ---
 
 <BaseLayout
@@ -24,7 +34,26 @@ const { Content } = await render(post);
   updatedDate={post.data.updatedDate}
   ogType="article"
 >
+  <div class="post-shell">
+    {toc.length > 2 && (
+      <aside class="toc" aria-label="Contents">
+        <p class="toc-title">In this article</p>
+        <nav>
+          <ol>
+            {toc.map((h) => (
+              <li><a href={`#${h.slug}`}>{h.text}</a></li>
+            ))}
+          </ol>
+        </nav>
+      </aside>
+    )}
+
+    <div class="post-main">
   <article>
+    <p class="breadcrumb">
+      <a href="/">Home</a><span class="sep">/</span><a href="/blog">Writing</a>
+    </p>
+
     <h1>{post.data.title}</h1>
     <p class="post-meta">
       <time datetime={post.data.pubDate.toISOString()}>
@@ -46,6 +75,7 @@ const { Content } = await render(post);
           </time>
         </>
       )}
+      {` · ${minutes} min read`}
     </p>
 
     {post.data.tags.length > 0 && (
@@ -67,4 +97,138 @@ const { Content } = await render(post);
 
   <hr />
   <Giscus />
+    </div>
+  </div>
 </BaseLayout>
+
+<style>
+  .post-main {
+    max-width: var(--content-width);
+    margin: 0 auto;
+    min-width: 0;
+  }
+
+  .toc {
+    display: none;
+  }
+
+  /* Below this width there is no room for a second column, and a long post
+     reads perfectly well without one. */
+  @media (min-width: 64rem) {
+    /* The article keeps the width and the centring every other page on the
+       site uses, so it stays lined up with the header. The post breaks out of
+       main only to give the contents list a gutter to live in. */
+    :global(main) {
+      max-width: none;
+    }
+
+    .post-shell {
+      display: grid;
+      grid-template-columns:
+        minmax(12rem, 18rem)
+        minmax(0, var(--content-width))
+        minmax(0, 18rem);
+      justify-content: center;
+      gap: 2rem;
+      align-items: start;
+    }
+
+    .post-main {
+      grid-column: 2;
+      margin: 0;
+    }
+
+    /* Left of its column rather than hard against the article, so the space
+       out there gets used. Capping the gutter at 18rem stops the list
+       drifting away from the text on a very wide display. */
+    .toc {
+      display: block;
+      grid-column: 1;
+      justify-self: start;
+      max-width: 15rem;
+      position: sticky;
+      top: 2.5rem;
+      max-height: calc(100vh - 5rem);
+      overflow-y: auto;
+    }
+  }
+
+  .toc-title {
+    margin: 0 0 0.6rem;
+    font-size: 0.75rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--color-text-muted);
+  }
+
+  .toc ol {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    border-left: 1px solid var(--color-border);
+  }
+
+  .toc li {
+    margin: 0;
+  }
+
+  .toc a {
+    display: block;
+    padding: 0.3rem 0 0.3rem 0.9rem;
+    margin-left: -1px;
+    border-left: 1px solid transparent;
+    font-size: 0.85rem;
+    line-height: 1.35;
+    color: var(--color-text-muted);
+    text-decoration: none;
+  }
+
+  .toc a:hover {
+    color: var(--color-text);
+    border-left-color: var(--color-spice);
+    text-decoration: none;
+  }
+
+  /* Set by the script below as the reader moves down the page. */
+  .toc a.is-active {
+    color: var(--color-text);
+    border-left-color: var(--color-accent);
+  }
+</style>
+
+<script>
+  // Mark the section the reader is currently in. Nothing here is required
+  // to navigate: without it the contents list is still a list of links.
+  const links = [...document.querySelectorAll('.toc a')];
+  const sections = links
+    .map((a) => document.getElementById(decodeURIComponent(a.hash.slice(1))))
+    .filter((el) => el !== null);
+
+  if (sections.length > 0) {
+    // The current section is the last heading to have passed the top third
+    // of the window. The observer only decides when to recompute that, which
+    // is exactly when a heading crosses an edge, so there is no scroll
+    // handler firing on every frame.
+    const mark = () => {
+      const line = window.innerHeight / 3;
+      let current = sections[0];
+      for (const section of sections) {
+        if (section.getBoundingClientRect().top <= line) current = section;
+      }
+      for (const link of links) {
+        link.classList.toggle(
+          'is-active',
+          decodeURIComponent(link.hash.slice(1)) === current.id
+        );
+      }
+    };
+
+    const observer = new IntersectionObserver(mark, {
+      rootMargin: '0px 0px -66% 0px',
+      threshold: 0,
+    });
+
+    for (const section of sections) observer.observe(section);
+    mark();
+  }
+</script>

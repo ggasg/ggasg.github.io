@@ -26,8 +26,9 @@ const posts = allPosts.sort(
               day: 'numeric',
             })}
           </time>
-          <a href={`/blog/${post.id}/`}>{post.data.title}</a>
+          <a class="post-link" href={`/blog/${post.id}/`}>{post.data.title}</a>
           {post.data.draft && <span class="tag">draft</span>}
+          <p>{post.data.description}</p>
         </li>
       ))}
     </ul>
