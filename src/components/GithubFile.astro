@@ -43,7 +43,13 @@ const rangeLabel =
 ---
 
 <div class="gh-file">
-  <a class="gh-file-header" href={blobUrl} target="_blank" rel="noopener noreferrer">
+  <a
+    class="gh-file-header"
+    href={blobUrl}
+    target="_blank"
+    rel="noopener noreferrer"
+    data-goatcounter-click={`github/${repo.split('/')[1]}/blob/${commit}/${path}`}
+  >
     <span class="gh-file-path">{path}</span>
     {rangeLabel && <span class="gh-file-range">{rangeLabel}</span>}
   </a>

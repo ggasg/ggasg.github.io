@@ -31,6 +31,10 @@ const ogImageURL = ogImage ? new URL(ogImage, Astro.site) : null;
 // with the code it gives you (the part before ".goatcounter.com"). Only
 // loads on the production build, never in `astro dev`.
 const GOATCOUNTER_CODE = 'ggasgg';
+
+// Google Search Console ownership check (URL-prefix property for
+// https://ggasg.github.io/). Removing it un-verifies the property.
+const GOOGLE_SITE_VERIFICATION = 'r34FUDQqvlLkEMOuT1twWoRmr_yjxsQyLAylsvDDVKA';
 ---
 
 <!doctype html>
@@ -42,6 +46,7 @@ const GOATCOUNTER_CODE = 'ggasgg';
     <meta name="description" content={description} />
     <link rel="canonical" href={canonicalURL} />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="google-site-verification" content={GOOGLE_SITE_VERIFICATION} />
     <link
       rel="alternate"
       type="application/rss+xml"
