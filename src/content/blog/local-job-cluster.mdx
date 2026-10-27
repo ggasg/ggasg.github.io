@@ -1,0 +1,215 @@
+---
+title: "Running your own local 'Job Cluster'"
+description: "Most of what a Databricks job cluster does maps to open source Spark settings. This article builds a small one on your local computer, with kind, the Spark Operator and MinIO, to watch distributed Spark jobs run."
+pubDate: 2026-10-27
+draft: false
+tags: ["apache-spark", "kubernetes", "databricks", "delta-lake", "minio"]
+repo: "https://github.com/ggasg/eventually-consistent/tree/main/local-job-cluster"
+ogImage: "/og/local-job-cluster-2.png"
+---
+
+import Note from '../../components/Note.astro';
+import Terminal from '../../components/Terminal.astro';
+import GithubFile from '../../components/GithubFile.astro';
+
+{/* Snippets are pinned to the commit that added local-job-cluster/. */}
+export const REPO = "ggasg/eventually-consistent";
+export const SHA = "b7efe2b9258cc4a464351922739deb133698b82e";
+
+<div class="standfirst">
+
+A Databricks job cluster behaves in such a way that it will start when the Lakeflow Job is triggered, complete the workflow execution, and then
+disappear. Almost every part of this behaviour can be mapped to something OSS Spark already
+does one way or another. In this article you'll build a small job cluster on your local computer and use it to watch the execution of a distributed Spark job.
+
+</div>
+
+<Note title="Before you continue">
+This setup does not reproduce Databricks job clusters. It
+maps behaviour that Databricks documents publicly to features of open source Spark and Kubernetes.
+Databricks and Lakeflow are trademarks of Databricks, Inc., and this article is not affiliated with
+or endorsed by Databricks.
+</Note>
+
+## Why not `local[*]`
+
+In local mode the driver and all tasks share one JVM instance. If your job does an Exchange, it won't happen over a network.
+Without a fancy simulation, no executors can be lost, and the driver never has to ask for resources. This is great for testing your pipeline's logic,
+but at some point you'll want to take the next step and see how it behaves on a cluster.
+
+This local "job cluster", in particular, keeps the driver and the executors in separate pods on separate nodes, and
+you'll use `kubectl` to see this.
+
+> The cluster definition, the jobs and the tests live in the [`eventually-consistent/local-job-cluster`](https://github.com/ggasg/eventually-consistent/tree/main/local-job-cluster) repository.
+
+## The mapping
+
+A Databricks job declares its cluster in a
+[cluster spec](https://docs.databricks.com/api/workspace/clusters/create). In our local cluster, the same
+information goes into a `SparkApplication` file, which the
+[Spark Operator](https://github.com/kubeflow/spark-operator) turns into a `spark-submit` in
+cluster mode on Kubernetes ([kind](https://kind.sigs.k8s.io/), here).
+
+| Databricks | Local equivalent |
+|---|---|
+| [Job compute](https://docs.databricks.com/aws/en/jobs/compute), one cluster per run | A `SparkApplication`: one driver pod, which creates its executor pods |
+| `spark_version` ([Databricks Runtime](https://docs.databricks.com/aws/en/release-notes/runtime)) | `image`: Spark, Delta Lake, S3A and Python in one container |
+| `driver_node_type_id`, `node_type_id` | Node labels, node selectors, cores and memory |
+| `autoscale.min_workers`, `max_workers` | `dynamicAllocation.minExecutors`, `maxExecutors` |
+| `spark_conf` | `sparkConf` |
+| Cloud object storage | MinIO, through Hadoop's S3A connector |
+| Spark UI of a terminated cluster | Event logs, read by the Spark History Server |
+
+## Setting it up
+
+To get a bit closer to what a typical Lakeflow Job would do, I've added support for cloud storage through MinIO, and for Delta Lake.
+So, to run the sample, you need Docker Desktop, kind, kubectl, Helm and a MinIO server with a bucket named
+`spark-experiments`. From the `local-job-cluster` folder:
+
+```sh
+kind create cluster --name spark-cluster --config code/infra/kind-config.yml
+docker build -t spark-with-delta:4.1.3 code/infra
+kind load docker-image spark-with-delta:4.1.3 --name spark-cluster
+kubectl apply -f code/infra/spark-jobs.yml
+helm install spark-operator spark-operator --repo https://kubeflow.github.io/spark-operator \
+  --version 2.5.2 -n spark-operator --create-namespace \
+  -f code/infra/spark-operator-values.yaml --wait
+kubectl config set-context kind-spark-cluster --namespace spark-jobs
+```
+
+The first command creates four Docker containers acting as nodes. The image is loaded into
+them directly, so no registry is involved. `spark-jobs.yml` creates the namespace, the
+service account the driver uses to create its executors, and the History Server (which you need to see execution details after the cluster terminates).
+
+Those four containers, and the Spark Operator and History Server inside them, will stay running after
+a job is completed. They play the part of the cloud machines and shared services, while the job cluster
+itself, the driver and its executors, is created and removed with each run. When you are done for
+the day, `kind delete cluster --name spark-cluster` removes them, and the tables in MinIO and the
+event logs will be kept.
+
+To run a job, and to run it again after changing it:
+
+```sh
+kubectl replace --force -f code/jobs/generate-touch-events.yaml
+```
+
+## "Databricks Runtime" as a container image
+
+A Databricks Runtime conveniently pins a Spark version together with Delta Lake, connectors and a Python
+version. The local runtime is a Dockerfile on top of the official `apache/spark` image that adds
+the Delta jars, `hadoop-aws` with its AWS SDK bundle, and Python 3.12.
+You define your job in a YAML file specifying the image and the Python file or package. See how job arguments are simulated on line 16:
+
+<GithubFile repo={REPO} commit={SHA} path="local-job-cluster/code/jobs/dedup-analysis.yaml" lang="yaml" startLine={8} endLine={31} />
+
+The job code is not baked into the image. kind mounts `code/app` into every node and the pods
+mount it at `/opt/app`, so you are free to change the code without rebuilding the image for the next run.
+
+## Driver and worker types
+
+On Databricks you choose a node type for the driver and another for the workers, and the
+[compute configuration reference](https://docs.databricks.com/aws/en/compute/configure) notes
+that the driver defaults to the workers' type. Here, we assign labels to nodes:
+
+<GithubFile repo={REPO} commit={SHA} path="local-job-cluster/code/infra/kind-config.yml" lang="yaml" startLine={13} endLine={22} />
+
+and each job places its pods with node selectors:
+
+<GithubFile repo={REPO} commit={SHA} path="local-job-cluster/code/jobs/dedup-analysis.yaml" lang="yaml" startLine={40} endLine={42} />
+
+All kind nodes share your local computer's CPU and memory, so the nodes only differ in what is allowed to
+run on them. This is enough to see where each task runs and how work is spread across executors.
+
+## Simulating cloud storage
+
+MinIO is a handy way to simulate cloud storage thanks to its implementation of the S3 API, so the S3A
+connector that would talk to AWS talks to a MinIO server on your computer instead. I got this idea from Eric Tome, who uses
+MinIO as local object storage throughout
+[*Data Engineering with Scala and Spark*](https://github.com/PacktPublishing/Data-Engineering-with-Scala-and-Spark),
+written with David Radford and Rupam Bhattacharjee. In the job files, it looks like this:
+
+<GithubFile repo={REPO} commit={SHA} path="local-job-cluster/code/jobs/dedup-analysis.yaml" lang="yaml" startLine={64} endLine={69} />
+
+Pods reach your computer through Docker Desktop's `host.docker.internal`. Path-style access is
+needed because MinIO serves buckets as paths under the endpoint rather than as subdomains. The
+`minioadmin` keys are MinIO's defaults and I strongly encourage you to change them. The Databricks analogy is a Unity Catalog storage credential attached to an
+[external location](https://docs.databricks.com/aws/en/connect/storage/).
+
+<Note title="Concurrency caveat">
+Delta Lake's default log store for S3 is safe when a single cluster writes to a table.
+Concurrent writers from several clusters need the DynamoDB-backed log store described in the
+[Delta Lake storage documentation](https://docs.delta.io/latest/delta-storage.html).
+</Note>
+
+## Accessing the Spark UI
+
+Databricks keeps the Spark UI of terminated compute
+([Manage classic compute](https://docs.databricks.com/aws/en/compute/clusters-manage)). Open source
+Spark does the same with event logs: the driver writes every scheduler event to a file, and the
+[History Server](https://spark.apache.org/docs/latest/monitoring.html) can rebuild the UI from them.
+In our local cluster, the logs are saved to a folder mounted from your computer, so they outlive the driver pod, and the History
+Server runs in the Kubernetes cluster at `localhost:18080`.
+
+## Watching a sample job
+
+Next, let's run through a very simple execution plan analysis on this cluster.
+With the `touch_events` table generated by
+[`generate.py`](https://github.com/ggasg/eventually-consistent/blob/b7efe2b9258cc4a464351922739deb133698b82e/local-job-cluster/code/app/touch_events/generate.py)
+(how it fakes redelivered events is a topic for a future article), run the deduplication job and
+watch the pods in another terminal:
+
+```sh
+kubectl replace --force -f code/jobs/dedup-analysis.yaml
+kubectl get pods -o wide -w
+```
+
+{/* Output of a run on a 1M-event table, trimmed to the dedup job's pods and to the NAME, STATUS, AGE and NODE columns. */}
+<Terminal content={`NAME                                     STATUS              AGE   NODE
+dedup-analysis-driver                    Running             6s    spark-cluster-worker
+dedup-distinct-c9e4dfa17f075579-exec-1   Running             3s    spark-cluster-worker3
+dedup-distinct-c9e4dfa17f075579-exec-2   Pending             0s    spark-cluster-worker2
+dedup-distinct-c9e4dfa17f075579-exec-2   ContainerCreating   0s    spark-cluster-worker2
+dedup-distinct-c9e4dfa17f075579-exec-2   Running             0s    spark-cluster-worker2
+dedup-distinct-c9e4dfa17f075579-exec-1   Terminating         10s   spark-cluster-worker3
+dedup-distinct-c9e4dfa17f075579-exec-2   Terminating         3s    spark-cluster-worker2
+dedup-distinct-c9e4dfa17f075579-exec-2   Completed           4s    spark-cluster-worker2
+dedup-distinct-c9e4dfa17f075579-exec-1   Completed           10s   spark-cluster-worker3
+dedup-analysis-driver                    Completed           14s   spark-cluster-worker`} />
+
+kind names the nodes after their role in Kubernetes, so `spark-cluster-worker` is the node labelled
+as the driver node, and `spark-cluster-worker2` and `spark-cluster-worker3` are the two worker nodes.
+The Spark driver lands on the driver node and starts with one executor. As tasks queue up, Spark asks
+for a second one, which the scheduler places on the other worker node. With a million events the job
+finishes before it needs more; a larger table (the argument of `generate-touch-events.yaml`) brings it
+closer to the maximum of four. When the driver ends, the executors go with it.
+
+And, on to the physical plan. `distinct()` has no operator of its own: Spark plans
+it as a `HashAggregate` with no aggregate functions, grouping by every column, first on each
+executor and then again after an `Exchange` that shuffles rows by a hash of those columns. 
+Curiously, reading that list of grouping keys is how a bug in this code surfaced. The first version compared whole
+rows, `ingest_ts` included, and since a redelivered event only differs from the original in when
+it arrived, not a single duplicate was removed. The fixed version drops `ingest_ts` before calling
+`distinct()`.
+
+## Differences from Databricks job clusters
+
+Databricks runs one executor per worker node, and its autoscaling adds and removes nodes. Here
+the nodes are fixed and Spark's
+[dynamic allocation](https://spark.apache.org/docs/latest/job-scheduling.html#dynamic-resource-allocation)
+adds and removes executors. A Databricks
+[knowledge base article](https://kb.databricks.com/clusters/enabling-dynamic-allocation-leads-to-nodes_lost-scenario)
+states that dynamic allocation is not supported there. Removing an executor that holds shuffle
+output needs some care without an external shuffle service, and the job files enable
+decommissioning for it, the same mechanism Databricks
+[documents for spot instances](https://docs.databricks.com/aws/en/compute/clusters-manage).
+
+Startup is also compressed here. A local job cluster is ready in seconds, while Databricks provisions
+cloud VMs, which takes minutes unless a [pool](https://docs.databricks.com/aws/en/compute/pool-index)
+keeps them warm.
+[Photon](https://docs.databricks.com/aws/en/runtime/photon) is proprietary and has no counterpart
+here; Unity Catalog's open source release and something like
+[init scripts](https://docs.databricks.com/aws/en/init-scripts/) could be added.
+
+What this setup does offer is a place to see how Spark spreads work over a cluster, with every
+moving part in view. If you have built something similar a different way, or found a mistake
+here, the comments are open and so is the repository.
