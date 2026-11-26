@@ -1,0 +1,275 @@
+---
+title: "Testing the merge behind a monthly average in Spark"
+description: "Averaging daily averages gives the wrong monthly figure. Carrying a sum and a count fixes it, but only because the merge obeys a few algebraic laws that Spark relies on and never checks. ScalaCheck can check them."
+pubDate: 2026-11-26
+draft: false
+tags: ["scala", "apache-spark", "scalacheck", "property-based-testing", "functional-programming"]
+repo: "https://github.com/ggasg/eventually-consistent/tree/main/rolling-up-average-order-value"
+ogImage: "/og/rolling-up-average-order-value.png"
+---
+
+import Note from '../../components/Note.astro';
+
+<style>{`
+  .fig { --s2: #c9527a; margin: 2rem 0; }
+  .fig svg { width: 100%; height: auto; display: block; }
+  .fig figcaption {
+    font-size: 0.85rem; color: var(--color-text-muted);
+    margin-top: 0.6rem; line-height: 1.5;
+  }
+  .fig .hd   { fill: var(--color-text-muted); font-size: 11px; font-family: var(--font-sans); font-weight: 600; }
+  .fig .lbl  { fill: var(--color-text); font-size: 12px; font-family: var(--font-sans); }
+  .fig .tick { fill: var(--color-text); font-size: 12px; font-family: var(--font-mono); }
+  .fig .code { fill: var(--color-text-muted); font-size: 11.5px; font-family: var(--font-mono); }
+  .fig .val  { font-size: 12px; font-family: var(--font-mono); font-weight: 600; }
+  .fig .note { fill: var(--color-text-muted); font-size: 11px; font-family: var(--font-mono); }
+  .fig .axis { stroke: var(--color-border); stroke-width: 1; }
+  .fig .rule { stroke: var(--color-text-muted); stroke-width: 1; }
+  .fig .lead { stroke-width: 1; stroke-dasharray: 3 3; }
+  .fig .hl   { fill: none; stroke: var(--s2); stroke-width: 1.25; stroke-dasharray: 4 3; }
+  .fig .err   { fill: var(--s2); }
+  .fig .ok    { fill: var(--color-accent); }
+  .fig .err-s { stroke: var(--s2); }
+  .fig .ok-s  { stroke: var(--color-accent); }
+  @media (prefers-color-scheme: light) { .fig { --s2: #7a2144; } }
+  math[display="block"] { margin: 1.5rem 0; font-size: 1.15em; }
+`}</style>
+
+<div class="standfirst">
+
+A distributed aggregation gives correct results only if the step that combines partial results obeys a few algebraic laws. When you write your own aggregation in Spark, it relies on those laws and has no way to verify them. This article walks through a common bug I've seen in reporting queries and fixes it with a small immutable type.
+
+</div>
+
+## Use case: a monthly average
+
+Imagine an online store whose sales are reported by a third-party e-commerce platform. The platform shares a dataset with total sales, number of orders and average order value, one row per day. At the end of the month someone asks for the monthly average order value, and this query looks like the natural answer:
+
+```sql
+SELECT AVG(avg_order_value) FROM daily_sales WHERE sales_month = '2026-11';
+```
+
+Something is off. See below for what the export states for two sample days, next to a comparison of our query's result against the correct one:
+
+<figure class="fig">
+<svg viewBox="0 0 700 186" role="img" aria-label="Daily export for two days and two monthly rollups: averaging the averages gives $35, dividing total sales by total orders gives $44">
+  <text class="hd" x="10" y="22">Day</text>
+  <text class="hd" x="200" y="22" text-anchor="end">Total sales</text>
+  <text class="hd" x="330" y="22" text-anchor="end">Avg order value</text>
+  <text class="hd" x="410" y="22" text-anchor="end">Orders</text>
+  <line class="axis" x1="0" y1="32" x2="420" y2="32"/>
+  <text class="lbl" x="10" y="56">Day 1</text>
+  <text class="tick" x="200" y="56" text-anchor="end">$200.00</text>
+  <text class="tick" x="330" y="56" text-anchor="end">$50.00</text>
+  <text class="tick" x="410" y="56" text-anchor="end">4</text>
+  <text class="lbl" x="10" y="82">Day 2</text>
+  <text class="tick" x="200" y="82" text-anchor="end">$20.00</text>
+  <text class="tick" x="330" y="82" text-anchor="end">$20.00</text>
+  <text class="tick" x="410" y="82" text-anchor="end">1</text>
+  <line class="rule" x1="0" y1="96" x2="420" y2="96"/>
+  <text class="code" x="10" y="122">AVG(avg_order_value)</text>
+  <text class="val err" x="330" y="122" text-anchor="end">$35.00</text>
+  <text class="code" x="10" y="158">SUM(total_sales) / SUM(orders)</text>
+  <text class="val ok" x="330" y="158" text-anchor="end">$44.00</text>
+  <rect class="hl" x="378" y="41" width="40" height="48" rx="4"/>
+  <line class="lead err-s" x1="418" y1="65" x2="452" y2="65"/>
+  <text class="lbl err" x="458" y="62">Ignored by the first query</text>
+  <text class="note" x="458" y="77">4 orders on day 1, 1 on day 2</text>
+  <line class="lead err-s" x1="338" y1="118" x2="452" y2="118"/>
+  <text class="lbl err" x="458" y="115">Each day counts once</text>
+  <text class="note" x="458" y="130">($50 + $20) / 2</text>
+  <line class="lead ok-s" x1="338" y1="154" x2="452" y2="154"/>
+  <text class="lbl ok" x="458" y="151">Each order counts once</text>
+  <text class="note" x="458" y="166">($200 + $20) / (4 + 1)</text>
+</svg>
+<figcaption>Sample export including two days, and two ways of rolling it up into a monthly figure.</figcaption>
+</figure>
+
+Our first query gives every day the same weight, however many orders it had. The two results will agree only when every day has the same number of orders, and a real store rarely has two such days in a row.
+
+The export already holds what the correct answer needs, because the average column is only the ratio of the other two. Written out for a month of <math><mi>k</mi></math> days, where day <math><mi>i</mi></math> has total sales <math><msub><mi>s</mi><mi>i</mi></msub></math> and <math><msub><mi>n</mi><mi>i</mi></msub></math> orders, the correct monthly figure is on the left, and what the query computes is on the right:
+
+<math display="block"><mfrac><mrow><munderover><mo>&#x2211;</mo><mrow><mi>i</mi><mo>=</mo><mn>1</mn></mrow><mi>k</mi></munderover><msub><mi>s</mi><mi>i</mi></msub></mrow><mrow><munderover><mo>&#x2211;</mo><mrow><mi>i</mi><mo>=</mo><mn>1</mn></mrow><mi>k</mi></munderover><msub><mi>n</mi><mi>i</mi></msub></mrow></mfrac><mo>&#x2260;</mo><mfrac><mn>1</mn><mi>k</mi></mfrac><munderover><mo>&#x2211;</mo><mrow><mi>i</mi><mo>=</mo><mn>1</mn></mrow><mi>k</mi></munderover><mfrac><msub><mi>s</mi><mi>i</mi></msub><msub><mi>n</mi><mi>i</mi></msub></mfrac></math>
+
+The left side divides only once, at the very end. Until then it adds sums to sums and counts to counts, so any two days can be combined into a single partial result:
+
+<math display="block"><mo stretchy="false">(</mo><msub><mi>s</mi><mn>1</mn></msub><mo>,</mo><msub><mi>n</mi><mn>1</mn></msub><mo stretchy="false">)</mo><mo>&#x2295;</mo><mo stretchy="false">(</mo><msub><mi>s</mi><mn>2</mn></msub><mo>,</mo><msub><mi>n</mi><mn>2</mn></msub><mo stretchy="false">)</mo><mo>=</mo><mo stretchy="false">(</mo><msub><mi>s</mi><mn>1</mn></msub><mo>+</mo><msub><mi>s</mi><mn>2</mn></msub><mo>,</mo><msub><mi>n</mi><mn>1</mn></msub><mo>+</mo><msub><mi>n</mi><mn>2</mn></msub><mo stretchy="false">)</mo></math>
+
+Combining days this way, in any number and any order, leaves the division for last. The rest of this article builds <math><mo>&#x2295;</mo></math> as a `merge` function in Scala and tests it.
+
+> The code and tests live in the [`eventually-consistent/rolling-up-average-order-value`](https://github.com/ggasg/eventually-consistent/tree/main/rolling-up-average-order-value) repository. This article is also my introduction to property-based testing. I had not used ScalaCheck before writing it, and I would welcome feedback from people who use it daily.
+
+---
+
+## From ⊕ to a Scala type
+
+Let's step away from SQL for a moment and write <math><mo>&#x2295;</mo></math> in Scala. Below we define a small immutable type that holds the sum and the count:
+
+```scala
+final case class Avg(sum: Long, count: Long) {
+  def merge(other: Avg): Avg = Avg(sum + other.sum, count + other.count)
+
+  def value: Option[Double] = if (count == 0) None else Some(sum.toDouble / count)
+}
+
+object Avg {
+  val zero: Avg = Avg(0L, 0L)
+
+  def of(amount: Long): Avg = Avg(amount, 1L)
+
+  def ofAll(amounts: Seq[Long]): Avg = amounts.foldLeft(zero)((acc, a) => acc.merge(of(a)))
+}
+```
+
+`merge` is <math><mo>&#x2295;</mo></math> itself: it adds the two sums and the two counts, and returns a new `Avg` without changing either input. `value` does the division, and only when we ask for it. It returns `None` when there are no orders, since there is nothing to average. The `object Avg` block below the class holds the helpers for building values: `zero` for no orders, `of` for a single order, and `ofAll` for a whole list, which starts from `zero` and merges the orders in one by one.
+
+Each row of the export becomes a partial result. The monthly figure merges the daily partial results by adding their sums and their counts, then divides once. In the example, `Avg(20000, 4)` merged with `Avg(2000, 1)` gives `Avg(22000, 5)`, and 22,000 cents over five orders is $44. Amounts are whole cents in a `Long`, so the arithmetic stays exact.
+
+`Avg` can be combined in any arrangement because <math><mo>&#x2295;</mo></math> satisfies three laws, where <math><mi>a</mi></math>, <math><mi>b</mi></math> and <math><mi>c</mi></math> are any partial results:
+
+* **Associativity.** <math><mo stretchy="false">(</mo><mi>a</mi><mo>&#x2295;</mo><mi>b</mi><mo stretchy="false">)</mo><mo>&#x2295;</mo><mi>c</mi><mo>=</mo><mi>a</mi><mo>&#x2295;</mo><mo stretchy="false">(</mo><mi>b</mi><mo>&#x2295;</mo><mi>c</mi><mo stretchy="false">)</mo></math>. How the work is grouped makes no difference.
+* **Commutativity.** <math><mi>a</mi><mo>&#x2295;</mo><mi>b</mi><mo>=</mo><mi>b</mi><mo>&#x2295;</mo><mi>a</mi></math>. Partial results can arrive in any order.
+* **Identity.** <math><mi>a</mi><mo>&#x2295;</mo><mo stretchy="false">(</mo><mn>0</mn><mo>,</mo><mn>0</mn><mo stretchy="false">)</mo><mo>=</mo><mi>a</mi></math>. Merging with an empty partial result changes nothing, so an empty day or an empty partition is harmless.
+
+---
+
+## The same merge inside Spark
+
+Distributed engines borrowed the idea of reducing data with a combining function from functional languages. Running that function in parallel turns the laws above into a requirement. Dean and Ghemawat's [MapReduce paper](https://static.googleusercontent.com/media/research.google.com/en//archive/mapreduce-osdi04.pdf) (OSDI 2004) credits the map and reduce primitives of Lisp as the inspiration for its programming model. Spark's `RDD.reduce` documents its argument as a commutative and associative binary operator.
+
+For custom aggregations on Datasets, Spark provides `Aggregator[IN, BUF, OUT]`, and `Avg` fits it directly as the buffer type:
+
+```scala
+final case class Order(day: Int, amountCents: Long)
+
+object AverageOrderValue extends Aggregator[Order, Avg, Double] {
+  def zero: Avg = Avg.zero
+  def reduce(b: Avg, order: Order): Avg = b.merge(Avg.of(order.amountCents))
+  def merge(b1: Avg, b2: Avg): Avg = b1.merge(b2)
+  def finish(b: Avg): Double = b.sum.toDouble / b.count
+  def bufferEncoder: Encoder[Avg] = Encoders.product[Avg]
+  def outputEncoder: Encoder[Double] = Encoders.scalaDouble
+}
+```
+
+Spark calls `reduce` to fold each row into a buffer within a partition, `merge` to combine buffers coming from different partitions, and `finish` once on the final buffer. The two encoders tell Spark how to serialize the buffer and the result. Which buffers are merged first depends on how the data was partitioned and on the order in which tasks complete, and Spark makes no promise about either. A partition plays the role here that a day played in the report: each one produces a partial result, and the final answer depends on those partial results combining correctly.
+
+Spark's own [guide to user-defined aggregate functions](https://spark.apache.org/docs/latest/sql-ref-functions-udf-aggregate.html) uses an average with a sum-and-count buffer as its main example.
+
+<Note type="caution" title="An incorrect merge still runs">
+The compiler checks that `merge` takes two buffers and returns one. It cannot check that the result obeys the laws, and Spark does not check either. A `merge` that breaks them still compiles and runs, and the number it returns can change from one run to the next as the partitioning changes. A small example-based test may not catch it, because a test that runs on a single partition may never merge two non-empty buffers. The laws need tests of their own.
+</Note>
+
+---
+
+## Checking the laws with ScalaCheck
+
+A conventional unit test picks an input and checks the output, for example that the average of 10 and 20 is 15. It covers the cases its author thought of. A property-based test states something that should hold for every input and lets a library generate the inputs. The approach comes from QuickCheck, a Haskell library by Koen Claessen and John Hughes ([ICFP 2000](https://dl.acm.org/doi/10.1145/351240.351266)). [ScalaCheck](https://scalacheck.org/), written by Rickard Nilsson, brings it to Scala.
+
+Pure functions are what make this practical. `merge` depends only on its two arguments and returns a new value without modifying either of them. ScalaCheck can call it on hundreds of random inputs without any setup or teardown, and any failure can be reproduced from the inputs alone.
+
+The first property states what the report got wrong. If the orders are split anywhere and each side gets its own partial result, merging the two must give the same result as processing all the orders at once:
+
+```scala
+object AvgProperties extends Properties("Avg") {
+
+  val amount: Gen[Long]        = Gen.choose(0L, 100000L)
+  val amounts: Gen[List[Long]] = Gen.listOf(amount)
+
+  property("merging two partitions equals computing the whole") =
+    forAll(amounts, amounts) { (left, right) =>
+      Avg.ofAll(left).merge(Avg.ofAll(right)) == Avg.ofAll(left ++ right)
+    }
+}
+```
+
+A `Gen[T]` describes how to produce random values of type `T`. ScalaCheck can generate any `Long` by itself, but that would include negative amounts and values large enough to overflow when added, so `amount` restricts orders to between zero and a thousand dollars. `forAll` turns a function of generated values into a property, and by default ScalaCheck evaluates it against a hundred random pairs of lists. `Properties` groups related properties under a name, and sbt runs them with `sbt test`. Generating two independent lists covers every possible split point and keeps the property short.
+
+The laws from earlier in the article become properties in the same way. They use a generator that builds random partial results out of random lists:
+
+```scala
+  val partial: Gen[Avg] = amounts.map(Avg.ofAll)
+
+  property("merge is associative") =
+    forAll(partial, partial, partial) { (a, b, c) =>
+      a.merge(b).merge(c) == a.merge(b.merge(c))
+    }
+
+  property("merge is commutative") =
+    forAll(partial, partial) { (a, b) =>
+      a.merge(b) == b.merge(a)
+    }
+```
+
+These properties compare `Avg` values, whose fields are integers, so equality is exact and no tolerance is needed.
+
+### ScalaCheck finds the reporting bug
+
+Applied to the original report, the same kind of property finds the bug on its own. The repository includes the naive rollup as a property that is expected to fail:
+
+```scala
+forAll(day, day) { (monday, tuesday) =>
+  val averageOfAverages =
+    (Avg.ofAll(monday).value.get + Avg.ofAll(tuesday).value.get) / 2
+  averageOfAverages == Avg.ofAll(monday ++ tuesday).value.get
+}
+```
+
+ScalaCheck reports the first failing input it finds and then shrinks it. Shrinking repeatedly simplifies the input, trying shorter lists and smaller numbers, for as long as the property keeps failing. The result is close to the smallest case that shows the problem:
+
+```text
+! Falsified after 4 passed tests.
+> ARG_0: List("0")
+> ARG_1: List("0", "1")
+> ARG_0_ORIGINAL: List("58622")
+> ARG_1_ORIGINAL: List("56107", "50197")
+```
+
+`ARG_0` is Monday and `ARG_1` is Tuesday, with amounts in cents. ScalaCheck starts with small inputs, so its first lists are short, and when both days have the same number of orders the naive formula happens to give the right answer.
+
+The shrunk case is the smallest version of the mistake. Monday has a single order of zero cents, and Tuesday has two orders, of zero cents and one cent. The average of the daily averages is a quarter of a cent, while the true average is a third of a cent. One day has one order and the other has two, which is the smallest difference in order counts that can expose the bug.
+
+### Running it on Spark
+
+The last property checks the `Aggregator` itself. It generates a list of orders and a number of partitions between one and eight, runs the aggregation on a local SparkSession, and compares the answer with `Avg.ofAll` over the same orders:
+
+```scala
+property("the result does not depend on partitioning") =
+  forAll(orders, partitions) { (os, n) =>
+    import spark.implicits._
+    val result = os.toDS().repartition(n).select(AverageOrderValue.toColumn).head()
+    result == Avg.ofAll(os.map(_.amountCents)).value.get
+  }
+```
+
+Each run starts a real Spark job, so this property runs twenty times instead of a hundred. Of all the tests, it is the one closest to production, where the engine decides the partitioning.
+
+---
+
+## When adding is not enough
+
+The sum-and-count buffer works because every order belongs to exactly one day. Adding two partial results never counts the same order twice.
+
+Distinct counts break that assumption. A customer can buy on Monday and again on Tuesday, so adding the daily counts of distinct customers counts that customer twice. A merge for distinct counts has to recognize an element present on both sides and count it once. The HyperLogLog++ sketch does this by taking the maximum of each register, since the same element always sets the same register to the same value in both sketches. As a result, merging a sketch with itself returns the same sketch, a law called idempotence. A sum-and-count buffer is not idempotent, and since orders never repeat across days, it has no reason to be.
+
+I wrote about this case in [Counting failing devices without keeping their names](/blog/counting-failing-devices/), using BigQuery's HLL++ functions. There, adding up twenty-four hourly counts includes a device once for every hour in which it appeared. Testing a merge like that takes one more property, `a.merge(a) == a`, alongside the ones above.
+
+---
+
+## Code and tests
+
+The repository contains `Avg`, the Spark `Aggregator`, and the ScalaCheck properties above:
+
+```
+code/
+  Avg.scala                           sum and count, merge, value
+  AverageOrderValue.scala             the Spark Aggregator built on Avg
+tests/
+  AvgProperties.scala                 split anywhere, same result; the merge laws
+  AverageOrderValueProperties.scala   same result for 1 to 8 Spark partitions
+  AverageOfAverages.scala             the naive rollup, falsified by ScalaCheck
+```
+
+`sbt test` runs every property except the naive rollup, which runs separately with `sbt "Test/runMain averages.AverageOfAverages"`.
+
+If you have written properties for an aggregation that was harder to state than an average, such as a percentile or a sessionization step, I would like to see them. Open an issue or a PR on the repository.
